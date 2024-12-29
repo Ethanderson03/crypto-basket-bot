@@ -17,7 +17,7 @@ A Python-based cryptocurrency trading strategy that uses market sentiment analys
 1. Clone the repository:
 
 ```bash
-git clone https://github.com/yourusername/crypto-market-sentiment.git
+git clone https://github.com/Ethanderson03/crypto-market-sentiment.git
 cd crypto-market-sentiment
 ```
 

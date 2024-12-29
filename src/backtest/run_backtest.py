@@ -5,13 +5,13 @@ from datetime import datetime, timedelta
 from typing import Dict, List
 from loguru import logger
 
-from src.data.ccxt_price_feed import CCXTPriceFeed
-from src.data.sentiment_analyzer import SentimentAnalyzer
-from src.analysis.market_analyzer import MarketAnalyzer
-from src.trading.position_manager import PositionManager
-from src.risk.risk_manager import RiskManager
-from src.analysis.order_book_analyzer import OrderBookAnalyzer
-from src.execution.order_executor import OrderExecutor
+from data.ccxt_price_feed import CCXTPriceFeed
+from data.sentiment_analyzer import SentimentAnalyzer
+from analysis.market_analyzer import MarketAnalyzer
+from trading.position_manager import PositionManager
+from risk.risk_manager import RiskManager
+from analysis.order_book_analyzer import OrderBookAnalyzer
+from execution.order_executor import OrderExecutor
 
 class BacktestRunner:
     """Runs backtests for the sentiment trading strategy."""

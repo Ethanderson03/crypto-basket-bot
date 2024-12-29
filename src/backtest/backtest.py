@@ -7,6 +7,8 @@ from strategy.sentiment_strategy import SentimentStrategy
 from dotenv import load_dotenv
 import os
 import argparse
+from dashboard.backtest_dashboard import create_backtest_dashboard
+import streamlit as st
 
 def parse_args():
     """Parse command line arguments."""
@@ -17,6 +19,8 @@ def parse_args():
                       help='Force fetch new data')
     parser.add_argument('--cache-dir', type=str, default='data/cache',
                       help='Directory to store cached data (default: data/cache)')
+    parser.add_argument('--show-dashboard', action='store_true', default=True,
+                      help='Show results dashboard after backtest (default: True)')
     return parser.parse_args()
 
 async def run_backtest(args):
@@ -59,9 +63,8 @@ async def run_backtest(args):
         # Initialize strategy
         logger.info("Initializing trading strategy...")
         strategy = SentimentStrategy(
-            symbols=symbols,
             price_feed=price_feed,
-            base_collateral=base_collateral
+            initial_balance=base_collateral
         )
         
         # Run simulation
@@ -76,7 +79,7 @@ async def run_backtest(args):
                     logger.info(f"Simulation progress: {progress:.1f}% ({current_time})")
                 
                 # Update strategy
-                await strategy.update()
+                await strategy.update(current_time, symbols)
                 
                 # Advance time
                 await price_feed.advance_time(3600)  # 1 hour steps
@@ -87,9 +90,17 @@ async def run_backtest(args):
                 logger.error(f"Error in backtest loop: {e}")
                 break
         
-        # Print results
+        # Get final results
+        current_prices = {symbol: await price_feed.get_current_price(symbol) for symbol in symbols}
+        final_value = strategy.get_portfolio_value(current_prices)
         logger.info("Backtest completed successfully")
-        logger.info(f"Final portfolio value: {strategy.get_portfolio_value()}")
+        logger.info(f"Final portfolio value: {final_value}")
+        
+        # Show dashboard if requested
+        if args.show_dashboard:
+            trades = strategy.get_trade_history()
+            metrics = strategy.get_metrics()
+            create_backtest_dashboard(trades, metrics, base_collateral)
         
     except Exception as e:
         logger.error(f"Error running backtest: {e}")

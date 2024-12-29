@@ -10,11 +10,7 @@ class Dashboard:
     """Dashboard for visualizing trading strategy performance."""
     
     def __init__(self):
-        st.set_page_config(
-            page_title="Crypto Sentiment Trading Dashboard",
-            page_icon="📈",
-            layout="wide"
-        )
+        """Initialize the dashboard."""
         self.initialize_session_state()
     
     def initialize_session_state(self):

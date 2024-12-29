@@ -1,8 +1,7 @@
 from typing import Dict, List, Optional
 from datetime import datetime
 from loguru import logger
-from ..data.sentiment_analyzer import SentimentAnalyzer
-from ..data.price_feed import PriceFeed
+from data import SentimentAnalyzer, PriceFeed
 
 class SentimentStrategy:
     """Trading strategy based on market sentiment analysis."""
@@ -19,7 +18,99 @@ class SentimentStrategy:
         self.position_size = 0.2  # Use 20% of balance per position
         self.stop_loss = 0.05  # 5% stop loss
         self.take_profit = 0.1  # 10% take profit
+    
+    async def update(self, timestamp: datetime, symbols: List[str]):
+        """Update strategy state and execute trades based on sentiment."""
+        # Get current prices for all tracked symbols
+        current_prices = {
+            symbol: await self.price_feed.get_current_price(symbol)
+            for symbol in symbols
+        }
         
+        # Track initial portfolio value
+        initial_portfolio_value = self.get_portfolio_value(current_prices)
+        
+        for symbol in symbols:
+            # Get sentiment score
+            sentiment = await self.sentiment_analyzer.get_combined_sentiment(symbol, timestamp)
+            current_price = current_prices[symbol]
+            
+            # First check if we need to exit any existing positions
+            if symbol in self.positions:
+                quantity = self.positions[symbol]
+                entry_price = next(
+                    (t['price'] for t in reversed(self.trades) 
+                     if t['symbol'] == symbol and t['side'] == 'buy'),
+                    None
+                )
+                
+                if entry_price:
+                    profit_pct = (current_price - entry_price) / entry_price
+                    
+                    # Exit if sentiment turns bearish or we hit take profit/stop loss
+                    if (sentiment < self.sentiment_threshold or 
+                        profit_pct <= -self.stop_loss or 
+                        profit_pct >= self.take_profit):
+                        
+                        # Calculate exit value
+                        exit_value = quantity * current_price
+                        self.balance += exit_value
+                        
+                        # Record trade with portfolio value
+                        self.trades.append({
+                            'timestamp': timestamp,
+                            'symbol': symbol,
+                            'side': 'sell',
+                            'quantity': quantity,
+                            'price': current_price,
+                            'value': exit_value,
+                            'portfolio_value': self.get_portfolio_value(current_prices)
+                        })
+                        
+                        # Remove position
+                        del self.positions[symbol]
+                        continue  # Skip entry check for this symbol
+            
+            # Then check if we should enter a new position
+            if symbol not in self.positions and sentiment > self.sentiment_threshold:
+                # Calculate position size with validation
+                max_position_value = self.balance * self.position_size
+                if max_position_value <= 0:
+                    logger.warning(f"Insufficient balance for trade: {self.balance}")
+                    continue
+                    
+                # Calculate quantity and validate
+                quantity = max_position_value / current_price
+                if quantity <= 0:
+                    logger.warning(f"Invalid quantity calculated: {quantity} for {symbol}")
+                    continue
+                    
+                # Recalculate final position value based on actual quantity
+                position_value = quantity * current_price
+                if position_value > self.balance:
+                    logger.warning(f"Trade value {position_value} exceeds available balance {self.balance}")
+                    continue
+                
+                # Enter long position
+                self.positions[symbol] = quantity
+                self.balance -= position_value
+                
+                # Record trade
+                self.trades.append({
+                    'timestamp': timestamp,
+                    'symbol': symbol,
+                    'side': 'buy',
+                    'quantity': quantity,
+                    'price': current_price,
+                    'value': position_value,
+                    'portfolio_value': self.get_portfolio_value(current_prices)
+                })
+        
+        # Log portfolio value change
+        final_portfolio_value = self.get_portfolio_value(current_prices)
+        value_change = final_portfolio_value - initial_portfolio_value
+        logger.info(f"Portfolio value changed by {value_change:.2f} to {final_portfolio_value:.2f}")
+    
     def get_portfolio_value(self, current_prices: Dict[str, float]) -> float:
         """Calculate total portfolio value including cash and positions."""
         position_value = sum(
@@ -28,93 +119,8 @@ class SentimentStrategy:
         )
         return self.balance + position_value
     
-    async def update(self, timestamp: datetime, symbols: List[str]) -> None:
-        """Update strategy state and execute trades based on sentiment."""
-        try:
-            # Get current prices for all symbols
-            current_prices = {
-                symbol: await self.price_feed.get_current_price(symbol)
-                for symbol in symbols
-            }
-            
-            for symbol in symbols:
-                # Get sentiment score
-                sentiment = await self.sentiment_analyzer.get_combined_sentiment(symbol, timestamp)
-                current_price = current_prices[symbol]
-                position = self.positions.get(symbol, 0)
-                
-                # Check exit conditions first
-                if position > 0:
-                    # Calculate profit/loss
-                    entry_price = next(
-                        (t['price'] for t in reversed(self.trades) 
-                         if t['symbol'] == symbol and t['side'] == 'buy'),
-                        current_price
-                    )
-                    pnl = (current_price - entry_price) / entry_price
-                    
-                    # Exit on stop loss or take profit
-                    if pnl <= -self.stop_loss or pnl >= self.take_profit:
-                        await self._execute_trade(symbol, 'sell', position, current_price, timestamp)
-                        continue
-                
-                # Entry logic based on sentiment
-                if sentiment > self.sentiment_threshold and position == 0:
-                    # Calculate position size
-                    amount_to_invest = self.balance * self.position_size
-                    quantity = amount_to_invest / current_price
-                    
-                    if quantity > 0:
-                        await self._execute_trade(symbol, 'buy', quantity, current_price, timestamp)
-                
-                # Exit on bearish sentiment
-                elif sentiment < (1 - self.sentiment_threshold) and position > 0:
-                    await self._execute_trade(symbol, 'sell', position, current_price, timestamp)
-        
-        except Exception as e:
-            logger.error(f"Error updating strategy: {e}")
-    
-    async def _execute_trade(self, symbol: str, side: str, quantity: float, price: float, timestamp: datetime) -> None:
-        """Execute a trade and update positions and balance."""
-        try:
-            trade_value = quantity * price
-            
-            if side == 'buy':
-                if trade_value <= self.balance:
-                    self.balance -= trade_value
-                    self.positions[symbol] = self.positions.get(symbol, 0) + quantity
-                else:
-                    logger.warning(f"Insufficient balance for trade: {trade_value} > {self.balance}")
-                    return
-            else:  # sell
-                self.balance += trade_value
-                self.positions[symbol] = self.positions.get(symbol, 0) - quantity
-            
-            # Record trade
-            self.trades.append({
-                'timestamp': timestamp,
-                'symbol': symbol,
-                'side': side,
-                'quantity': quantity,
-                'price': price,
-                'value': trade_value
-            })
-            
-            logger.info(f"Executed {side} trade: {quantity} {symbol} @ {price}")
-            
-        except Exception as e:
-            logger.error(f"Error executing trade: {e}")
-    
-    def get_trade_history(self) -> List[Dict]:
-        """Get list of all executed trades."""
-        return self.trades
-    
-    def get_current_positions(self) -> Dict[str, float]:
-        """Get current positions."""
-        return self.positions.copy()
-    
     def get_metrics(self) -> Dict:
-        """Calculate and return strategy performance metrics."""
+        """Calculate strategy performance metrics."""
         if not self.trades:
             return {
                 'total_trades': 0,
@@ -123,31 +129,97 @@ class SentimentStrategy:
                 'max_drawdown': 0.0
             }
         
-        total_trades = len(self.trades)
-        profitable_trades = sum(1 for t in self.trades if t['side'] == 'sell' and t['value'] > 0)
-        
-        metrics = {
-            'total_trades': total_trades,
-            'win_rate': profitable_trades / total_trades if total_trades > 0 else 0.0,
-            'avg_profit': (self.balance - 10000) / 10000 if total_trades > 0 else 0.0,
-            'max_drawdown': self._calculate_max_drawdown()
-        }
-        
-        return metrics
-    
-    def _calculate_max_drawdown(self) -> float:
-        """Calculate maximum drawdown from trade history."""
-        if not self.trades:
-            return 0.0
-        
-        peak = 10000  # Initial balance
-        max_drawdown = 0.0
+        # Track open positions and their average entry prices
+        open_positions: Dict[str, Dict] = {}  # symbol -> {quantity: float, avg_price: float}
+        completed_trades = []
         
         for trade in self.trades:
-            if trade['side'] == 'sell':
-                current_value = trade['value']
-                drawdown = (peak - current_value) / peak
-                max_drawdown = max(max_drawdown, drawdown)
-                peak = max(peak, current_value)
+            symbol = trade['symbol']
+            if trade['side'] == 'buy':
+                # Update or create position with new average entry price
+                if symbol not in open_positions:
+                    open_positions[symbol] = {
+                        'quantity': trade['quantity'],
+                        'avg_price': trade['price']
+                    }
+                else:
+                    # Calculate new average entry price
+                    current = open_positions[symbol]
+                    total_quantity = current['quantity'] + trade['quantity']
+                    current['avg_price'] = (
+                        (current['quantity'] * current['avg_price'] + 
+                         trade['quantity'] * trade['price']) / total_quantity
+                    )
+                    current['quantity'] = total_quantity
+            
+            elif trade['side'] == 'sell' and symbol in open_positions:
+                position = open_positions[symbol]
+                # Calculate profit for this exit
+                entry_value = trade['quantity'] * position['avg_price']
+                exit_value = trade['value']
+                profit = (exit_value - entry_value) / entry_value
+                
+                completed_trades.append({
+                    'symbol': symbol,
+                    'profit': profit,
+                    'quantity': trade['quantity']
+                })
+                
+                # Update remaining position
+                position['quantity'] -= trade['quantity']
+                if position['quantity'] <= 0:
+                    del open_positions[symbol]
+                
+        total_trades = len(completed_trades)
+        if total_trades == 0:
+            return {
+                'total_trades': 0,
+                'win_rate': 0.0,
+                'avg_profit': 0.0,
+                'max_drawdown': 0.0,
+                'open_positions': len(open_positions)
+            }
         
-        return max_drawdown 
+        # Weight profits by position size
+        total_quantity = sum(t['quantity'] for t in completed_trades)
+        weighted_profit = sum(
+            t['profit'] * (t['quantity'] / total_quantity)
+            for t in completed_trades
+        )
+        
+        winning_trades = len([t for t in completed_trades if t['profit'] > 0])
+        win_rate = winning_trades / total_trades
+        
+        # Calculate max drawdown using portfolio values
+        portfolio_values = []
+        current_value = 10000.0  # Initial balance
+        for trade in self.trades:
+            if trade['side'] == 'buy':
+                current_value -= trade['value']
+            else:
+                current_value += trade['value']
+            portfolio_values.append(current_value)
+        
+        max_drawdown = 0.0
+        peak = portfolio_values[0]
+        for value in portfolio_values:
+            if value > peak:
+                peak = value
+            drawdown = (peak - value) / peak
+            max_drawdown = max(max_drawdown, drawdown)
+        
+        return {
+            'total_trades': total_trades,
+            'win_rate': win_rate,
+            'avg_profit': weighted_profit,
+            'max_drawdown': max_drawdown,
+            'open_positions': len(open_positions)
+        }
+    
+    def get_trade_history(self) -> List[Dict]:
+        """Get the list of all trades."""
+        return self.trades
+    
+    def get_current_positions(self) -> Dict[str, float]:
+        """Get current positions."""
+        return self.positions 

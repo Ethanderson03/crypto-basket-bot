@@ -21,7 +21,7 @@ class CCXTPriceFeed:
         backtest_end: Optional[datetime] = None,
         exchanges: List[str] = ["kucoin", "gate", "huobi"],  # Default exchanges that work in most regions
         use_cached_data: bool = True,
-        cache_dir: str = "data/cache"
+        cache_dir: str = "src/data/cache"
     ):
         """
         Initialize the price feed.
