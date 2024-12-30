@@ -1,7 +1,10 @@
 from typing import Dict, List, Optional
 from datetime import datetime
 from loguru import logger
-from data import SentimentAnalyzer, PriceFeed
+
+from src.data.sentiment_analyzer import SentimentAnalyzer
+from src.data.price_feed import PriceFeed
+from .base_strategy import Strategy
 
 class SentimentStrategy:
     """Trading strategy based on market sentiment analysis."""

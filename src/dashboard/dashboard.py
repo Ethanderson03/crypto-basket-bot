@@ -1,195 +1,132 @@
-import streamlit as st
-import pandas as pd
+import dash
+from dash import html, dcc
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
+import pandas as pd
 import numpy as np
 from typing import Dict, List
+from dash.dependencies import Input, Output
+import threading
+import webbrowser
 
 class Dashboard:
-    """Dashboard for visualizing trading strategy performance."""
+    """Dashboard for visualizing trading strategy performance using Dash."""
     
-    def __init__(self):
+    def __init__(self, port=8050):
         """Initialize the dashboard."""
-        self.initialize_session_state()
+        self.port = port
+        self.app = dash.Dash(__name__)
+        self.latest_metrics = {}
+        self.setup_layout()
+        self.setup_callbacks()
+        
+    def setup_layout(self):
+        """Set up the dashboard layout."""
+        self.app.layout = html.Div([
+            html.H1('Crypto Trading Dashboard', style={'textAlign': 'center'}),
+            
+            # Metrics Cards
+            html.Div([
+                html.Div([
+                    html.H4('Total Trades'),
+                    html.H2(id='total-trades', children='0')
+                ], className='metric-card'),
+                html.Div([
+                    html.H4('Win Rate'),
+                    html.H2(id='win-rate', children='0%')
+                ], className='metric-card'),
+                html.Div([
+                    html.H4('Average Profit'),
+                    html.H2(id='avg-profit', children='0%')
+                ], className='metric-card'),
+                html.Div([
+                    html.H4('Portfolio Value'),
+                    html.H2(id='portfolio-value', children='$0')
+                ], className='metric-card'),
+            ], style={'display': 'flex', 'justifyContent': 'space-around', 'margin': '20px'}),
+            
+            # Charts
+            html.Div([
+                dcc.Graph(id='portfolio-chart'),
+                dcc.Graph(id='trades-chart'),
+            ]),
+            
+            # Interval component for updates
+            dcc.Interval(
+                id='interval-component',
+                interval=5*1000,  # in milliseconds
+                n_intervals=0
+            )
+        ])
+        
+        # Add custom CSS
+        self.app.index_string = '''
+        <!DOCTYPE html>
+        <html>
+            <head>
+                {%metas%}
+                <title>Trading Dashboard</title>
+                {%favicon%}
+                {%css%}
+                <style>
+                    .metric-card {
+                        background-color: #f8f9fa;
+                        border-radius: 10px;
+                        padding: 20px;
+                        text-align: center;
+                        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+                        flex: 1;
+                        margin: 0 10px;
+                    }
+                    .metric-card h4 {
+                        color: #666;
+                        margin: 0;
+                    }
+                    .metric-card h2 {
+                        color: #333;
+                        margin: 10px 0 0 0;
+                    }
+                </style>
+            </head>
+            <body>
+                {%app_entry%}
+                <footer>
+                    {%config%}
+                    {%scripts%}
+                    {%renderer%}
+                </footer>
+            </body>
+        </html>
+        '''
     
-    def initialize_session_state(self):
-        """Initialize session state variables."""
-        if 'start_time' not in st.session_state:
-            st.session_state.start_time = datetime.now()
-        if 'last_update' not in st.session_state:
-            st.session_state.last_update = datetime.now()
+    def setup_callbacks(self):
+        """Set up the dashboard callbacks."""
+        @self.app.callback(
+            [Output('total-trades', 'children'),
+             Output('win-rate', 'children'),
+             Output('avg-profit', 'children'),
+             Output('portfolio-value', 'children')],
+            [Input('interval-component', 'n_intervals')]
+        )
+        def update_metrics(_):
+            if not self.latest_metrics:
+                return '0', '0%', '0%', '$0'
+            
+            return (
+                str(self.latest_metrics.get('total_trades', 0)),
+                f"{self.latest_metrics.get('win_rate', 0):.1%}",
+                f"{self.latest_metrics.get('avg_profit', 0):.1%}",
+                f"${self.latest_metrics.get('portfolio_value', 0):,.2f}"
+            )
     
     def update_metrics(self, metrics: Dict):
         """Update dashboard metrics."""
-        st.session_state.last_update = datetime.now()
-        
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            st.metric(
-                "Total Trades",
-                f"{metrics['total_trades']}",
-                delta=None
-            )
-        
-        with col2:
-            st.metric(
-                "Win Rate",
-                f"{metrics['win_rate']:.1%}",
-                delta=None
-            )
-        
-        with col3:
-            st.metric(
-                "Average Profit",
-                f"{metrics['avg_profit']:.1%}",
-                delta=None
-            )
-        
-        with col4:
-            st.metric(
-                "Max Drawdown",
-                f"{metrics['max_drawdown']:.1%}",
-                delta=None
-            )
+        self.latest_metrics = metrics
     
-    def plot_portfolio_performance(self, trades: List[Dict]):
-        """Plot portfolio value over time."""
-        if not trades:
-            st.warning("No trades available to plot")
-            return
-        
-        # Convert trades to DataFrame
-        df = pd.DataFrame(trades)
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        
-        # Calculate cumulative portfolio value
-        df['cumulative_value'] = df['value'].cumsum()
-        
-        fig = go.Figure()
-        
-        fig.add_trace(
-            go.Scatter(
-                x=df['timestamp'],
-                y=df['cumulative_value'],
-                mode='lines',
-                name='Portfolio Value',
-                line=dict(color='blue')
-            )
-        )
-        
-        fig.update_layout(
-            title='Portfolio Performance',
-            xaxis_title='Time',
-            yaxis_title='Portfolio Value (USD)',
-            height=400
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-    
-    def plot_sentiment_vs_price(self, symbol: str, prices: List[float], sentiments: List[float], timestamps: List[datetime]):
-        """Plot price and sentiment over time for a symbol."""
-        if not prices or not sentiments:
-            st.warning(f"No data available for {symbol}")
-            return
-        
-        fig = make_subplots(specs=[[{"secondary_y": True}]])
-        
-        # Add price line
-        fig.add_trace(
-            go.Scatter(
-                x=timestamps,
-                y=prices,
-                name="Price",
-                line=dict(color='blue')
-            ),
-            secondary_y=False
-        )
-        
-        # Add sentiment line
-        fig.add_trace(
-            go.Scatter(
-                x=timestamps,
-                y=sentiments,
-                name="Sentiment",
-                line=dict(color='red')
-            ),
-            secondary_y=True
-        )
-        
-        fig.update_layout(
-            title=f'{symbol} Price vs Sentiment',
-            xaxis_title='Time',
-            height=400
-        )
-        
-        fig.update_yaxes(title_text="Price (USD)", secondary_y=False)
-        fig.update_yaxes(title_text="Sentiment Score", secondary_y=True)
-        
-        st.plotly_chart(fig, use_container_width=True)
-    
-    def show_recent_trades(self, trades: List[Dict]):
-        """Display recent trades in a table."""
-        if not trades:
-            st.warning("No trades to display")
-            return
-        
-        df = pd.DataFrame(trades)
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        df = df.sort_values('timestamp', ascending=False)
-        
-        st.subheader("Recent Trades")
-        st.dataframe(
-            df[['timestamp', 'symbol', 'side', 'quantity', 'price', 'value']],
-            use_container_width=True
-        )
-    
-    def show_current_positions(self, positions: Dict[str, float]):
-        """Display current positions."""
-        if not positions:
-            st.warning("No open positions")
-            return
-        
-        st.subheader("Current Positions")
-        df = pd.DataFrame([
-            {"symbol": symbol, "quantity": quantity}
-            for symbol, quantity in positions.items()
-            if quantity > 0
-        ])
-        
-        if not df.empty:
-            st.dataframe(df, use_container_width=True)
-    
-    def render(self, strategy_state: Dict):
-        """Render the complete dashboard."""
-        st.title("Crypto Sentiment Trading Dashboard")
-        
-        # Update metrics
-        self.update_metrics(strategy_state['metrics'])
-        
-        # Portfolio performance chart
-        self.plot_portfolio_performance(strategy_state['trades'])
-        
-        # Create two columns for positions and trades
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            self.show_current_positions(strategy_state['positions'])
-        
-        with col2:
-            self.show_recent_trades(strategy_state['trades'][-10:])  # Show last 10 trades
-        
-        # Sentiment analysis for each symbol
-        if 'sentiment_data' in strategy_state:
-            for symbol, data in strategy_state['sentiment_data'].items():
-                self.plot_sentiment_vs_price(
-                    symbol,
-                    data['prices'],
-                    data['sentiments'],
-                    data['timestamps']
-                )
-        
-        # Add update time
-        st.sidebar.markdown(f"Last updated: {st.session_state.last_update.strftime('%Y-%m-%d %H:%M:%S')}")
-        st.sidebar.markdown(f"Running since: {st.session_state.start_time.strftime('%Y-%m-%d %H:%M:%S')}") 
+    def run(self):
+        """Run the dashboard server."""
+        # Open browser in a separate thread
+        threading.Timer(1.5, lambda: webbrowser.open(f'http://localhost:{self.port}')).start()
+        # Run the server
+        self.app.run_server(debug=False, port=self.port) 

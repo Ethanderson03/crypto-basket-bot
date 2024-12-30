@@ -1,189 +1,97 @@
 import numpy as np
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 from loguru import logger
 
 class RiskManager:
-    """Handles risk monitoring and portfolio protection."""
-    
-    def __init__(self, price_feed):
-        self.price_feed = price_feed
+    def __init__(self, max_position_size: float = 0.1, max_leverage: float = 3.0):
+        self.max_position_size = max_position_size
+        self.max_leverage = max_leverage
+        self.positions = {}
+        self.portfolio_value = 0.0
+        self.current_time = None
         
-        # Risk parameters
-        self.min_health_ratio = 1.5
-        self.max_leverage = 2.0
-        self.min_free_collateral = 0.3  # 30% minimum free collateral
+    def update(self, positions: Dict[str, Dict], portfolio_value: float, current_time: datetime) -> Dict:
+        """Update risk metrics based on current positions and portfolio value."""
+        self.positions = positions
+        self.portfolio_value = portfolio_value
+        self.current_time = current_time
         
-        # Liquidation protection levels
-        self.liquidation_levels = {
-            1.4: 0.0,   # Start monitoring
-            1.3: 0.25,  # 25% reduction
-            1.2: 0.5,   # 50% reduction
-            1.1: 1.0    # Full deleveraging
+        metrics = {
+            'total_exposure': self.calculate_total_exposure(),
+            'max_drawdown': self.calculate_max_drawdown(),
+            'position_concentration': self.calculate_position_concentration(),
+            'leverage_ratio': self.calculate_leverage_ratio()
         }
         
-        # Portfolio state
-        self.positions: Dict[str, Dict] = {}
-        self.portfolio_value = 0.0
-        self.health_ratio = 2.0
-    
-    async def calculate_portfolio_health(self) -> float:
-        """Returns current portfolio health ratio."""
+        return metrics
+        
+    def check_trade(self, symbol: str, size: float, side: str, price: float) -> bool:
+        """Check if a trade meets risk management criteria."""
         try:
-            if not self.positions:
-                return 2.0  # Maximum health when no positions
+            # Calculate trade value
+            trade_value = abs(size * price)
             
-            total_position_value = 0.0
-            total_collateral = 0.0
-            
-            for symbol, position in self.positions.items():
-                current_price = await self.price_feed.get_current_price(symbol)
-                
-                position_value = position['size'] * current_price
-                collateral = position['collateral']
-                
-                total_position_value += position_value
-                total_collateral += collateral
-            
-            if total_position_value == 0:
-                return 2.0
-            
-            self.health_ratio = total_collateral / total_position_value
-            return self.health_ratio
-            
-        except Exception as e:
-            logger.error(f"Error calculating portfolio health: {e}")
-            return 1.0
-    
-    async def get_liquidation_prices(self) -> Dict[str, float]:
-        """Returns liquidation prices for all positions."""
-        try:
-            liquidation_prices = {}
-            
-            for symbol, position in self.positions.items():
-                current_price = await self.price_feed.get_current_price(symbol)
-                collateral = position['collateral']
-                size = position['size']
-                
-                if size > 0:
-                    # Calculate liquidation price with buffer
-                    maintenance_margin = collateral * 0.5  # 50% maintenance margin
-                    liquidation_price = current_price * (1 - maintenance_margin / (size * current_price))
-                    liquidation_prices[symbol] = liquidation_price
-            
-            return liquidation_prices
-            
-        except Exception as e:
-            logger.error(f"Error calculating liquidation prices: {e}")
-            return {}
-    
-    async def check_correlation_risks(self) -> Dict:
-        """Returns correlation risk metrics."""
-        try:
-            if len(self.positions) < 2:
-                return {'max_correlation': 0.0, 'risk_level': 'low'}
-            
-            # Get historical prices for correlation calculation
-            prices = {}
-            for symbol in self.positions:
-                candles = await self.price_feed.get_historical_candles(symbol, limit=100)
-                if candles:
-                    prices[symbol] = [float(c['close']) for c in candles]
-            
-            # Calculate correlations
-            correlations = []
-            symbols = list(prices.keys())
-            
-            for i in range(len(symbols)):
-                for j in range(i + 1, len(symbols)):
-                    if len(prices[symbols[i]]) == len(prices[symbols[j]]):
-                        corr = np.corrcoef(prices[symbols[i]], prices[symbols[j]])[0, 1]
-                        correlations.append(abs(corr))
-            
-            max_correlation = max(correlations) if correlations else 0.0
-            
-            return {
-                'max_correlation': max_correlation,
-                'risk_level': 'high' if max_correlation > 0.8 else 'medium' if max_correlation > 0.5 else 'low'
-            }
-            
-        except Exception as e:
-            logger.error(f"Error checking correlation risks: {e}")
-            return {'max_correlation': 0.0, 'risk_level': 'unknown'}
-    
-    async def calculate_max_position_size(
-        self,
-        symbol: str,
-        current_price: float,
-        order_book: Dict
-    ) -> float:
-        """Calculate maximum allowed position size."""
-        try:
-            # Get market depth metrics
-            bid_depth = sum(float(bid[1]) for bid in order_book.get('bids', [])[:10])
-            ask_depth = sum(float(ask[1]) for ask in order_book.get('asks', [])[:10])
-            market_depth = min(bid_depth, ask_depth)
-            
-            # Calculate size limits
-            portfolio_limit = self.portfolio_value * self.max_leverage * 0.15  # 15% max per position
-            depth_limit = market_depth * 0.1  # 10% of available liquidity
-            
-            # Consider current health ratio
-            health_factor = min(self.health_ratio / self.min_health_ratio, 1.0)
-            
-            # Take minimum of all constraints
-            max_size = min(
-                portfolio_limit,
-                depth_limit
-            ) * health_factor
-            
-            return max_size
-            
-        except Exception as e:
-            logger.error(f"Error calculating max position size: {e}")
-            return 0.0
-    
-    async def check_position_change(self, symbol: str, size_delta: float) -> bool:
-        """Check if a position change is allowed by risk limits."""
-        try:
-            # Get current portfolio health
-            health_ratio = await self.calculate_portfolio_health()
-            
-            # Check if we need to deleverage
-            for level, reduction in sorted(self.liquidation_levels.items(), reverse=True):
-                if health_ratio <= level:
-                    if size_delta > 0:  # Don't allow position increases when health is low
-                        return False
-                    if reduction > 0:  # Force position reduction
-                        return True
-            
-            # Check correlation risks
-            correlation_risks = await self.check_correlation_risks()
-            if correlation_risks['risk_level'] == 'high' and size_delta > 0:
+            # Check position size limit
+            if trade_value / self.portfolio_value > self.max_position_size:
+                logger.warning(f"Trade rejected: Position size {trade_value / self.portfolio_value:.2%} exceeds limit {self.max_position_size:.2%}")
                 return False
             
-            # Get current price and order book
-            current_price = await self.price_feed.get_current_price(symbol)
-            order_book = await self.price_feed.get_order_book(symbol)
+            # Calculate total exposure including new trade
+            total_exposure = self.calculate_total_exposure()
+            new_exposure = total_exposure + trade_value
             
-            # Calculate maximum allowed size
-            max_size = await self.calculate_max_position_size(
-                symbol,
-                current_price,
-                order_book
-            )
+            # Check leverage limit
+            if new_exposure / self.portfolio_value > self.max_leverage:
+                logger.warning(f"Trade rejected: Leverage {new_exposure / self.portfolio_value:.2f}x exceeds limit {self.max_leverage:.2f}x")
+                return False
             
-            # Check if new position would exceed limits
-            current_size = self.positions.get(symbol, {}).get('size', 0)
-            new_size = current_size + size_delta
+            # Check if we have an existing position
+            if symbol in self.positions:
+                existing_position = self.positions[symbol]
+                existing_side = existing_position['side']
+                
+                # Don't allow increasing position in opposite direction
+                if existing_side != side and size > 0:
+                    logger.warning(f"Trade rejected: Cannot increase position in opposite direction for {symbol}")
+                    return False
             
-            return 0 <= new_size <= max_size
+            return True
             
         except Exception as e:
-            logger.error(f"Error checking position change: {e}")
+            logger.error(f"Error checking trade: {str(e)}")
             return False
-    
-    def update_portfolio_state(self, positions: Dict[str, Dict], portfolio_value: float):
-        """Update internal portfolio state."""
-        self.positions = positions
-        self.portfolio_value = portfolio_value 
+            
+    def calculate_total_exposure(self) -> float:
+        """Calculate total exposure across all positions."""
+        total = 0.0
+        for symbol, position in self.positions.items():
+            total += abs(position['collateral'])
+        return total
+        
+    def calculate_max_drawdown(self) -> float:
+        """Calculate maximum drawdown."""
+        # In a real implementation, this would track historical equity curve
+        return 0.0
+        
+    def calculate_position_concentration(self) -> float:
+        """Calculate position concentration ratio."""
+        if not self.positions:
+            return 0.0
+            
+        exposures = []
+        for position in self.positions.values():
+            exposures.append(abs(position['collateral']))
+            
+        if not exposures:
+            return 0.0
+            
+        max_exposure = max(exposures)
+        total_exposure = sum(exposures)
+        
+        return max_exposure / total_exposure if total_exposure > 0 else 0.0
+        
+    def calculate_leverage_ratio(self) -> float:
+        """Calculate current leverage ratio."""
+        total_exposure = self.calculate_total_exposure()
+        return total_exposure / self.portfolio_value if self.portfolio_value > 0 else 0.0 

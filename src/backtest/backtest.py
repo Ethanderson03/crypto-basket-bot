@@ -1,13 +1,16 @@
+import argparse
 import asyncio
 from datetime import datetime, timedelta
 from loguru import logger
 import pandas as pd
-from data.ccxt_price_feed import CCXTPriceFeed
-from strategy.sentiment_strategy import SentimentStrategy
+from src.data.ccxt_price_feed import CCXTPriceFeed
+from src.analysis.market_analyzer import MarketAnalyzer
+from src.trading.position_manager import PositionManager
+from src.risk.risk_manager import RiskManager
+from src.analysis.order_book_analyzer import OrderBookAnalyzer
+from src.strategy.sentiment_strategy import SentimentStrategy
 from dotenv import load_dotenv
 import os
-import argparse
-from dashboard.backtest_dashboard import create_backtest_dashboard
 import streamlit as st
 
 def parse_args():

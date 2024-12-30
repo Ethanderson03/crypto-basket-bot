@@ -1,187 +1,212 @@
+import aiohttp
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Optional
-from datetime import datetime, timedelta
+from typing import Dict, List, Tuple
+from datetime import datetime
 from loguru import logger
+from src.data.ccxt_price_feed import CCXTPriceFeed
+from src.analysis.order_book_analyzer import OrderBookAnalyzer
+from src.analysis.sentiment_analyzer import SentimentAnalyzer
 
 class MarketAnalyzer:
-    """Handles market analysis and signal generation."""
-    
-    def __init__(self, price_feed, sentiment_analyzer):
-        self.price_feed = price_feed
-        self.sentiment_analyzer = sentiment_analyzer
-        
-        # EMA parameters
-        self.short_window = 20  # 20-hour EMA
-        self.long_window = 50   # 50-hour EMA
-        
-        # Market state cache
+    def __init__(self, short_window: int = 24, long_window: int = 72):
+        self.short_window = short_window
+        self.long_window = long_window
         self.market_state = {
             'direction': 0.0,
-            'sentiment': 0.0,
-            'volatility': 0.0,
+            'coin_directions': {},
+            'sentiment': 1.0,
+            'fear_greed': 50.0,
+            'basket_weights': {},
+            'correlations': {},
+            'is_oversold': False,
+            'is_overbought': False,
+            'volatility_multiplier': 1.0,
             'last_update': None
         }
     
-    async def analyze_market_direction(self) -> float:
-        """Returns market direction score (-1 to 1)."""
-        try:
-            # Get historical prices for major coins
-            symbols = ['BTC/USDT', 'ETH/USDT']
-            prices = {}
-            
-            for symbol in symbols:
-                candles = await self.price_feed.get_historical_candles(
-                    symbol,
-                    limit=self.long_window
-                )
-                if candles:
-                    df = pd.DataFrame(candles)
-                    prices[symbol] = df['close'].values
-            
-            if not prices:
-                return 0.0
-            
-            # Calculate EMAs for each symbol
-            directions = []
-            for symbol, price_data in prices.items():
-                if len(price_data) >= self.long_window:
-                    ema_short = pd.Series(price_data).ewm(span=self.short_window).mean().iloc[-1]
-                    ema_long = pd.Series(price_data).ewm(span=self.long_window).mean().iloc[-1]
-                    
-                    # Calculate direction (-1 to 1)
-                    direction = (ema_short / ema_long - 1) * 10  # Scale the signal
-                    direction = max(min(direction, 1), -1)  # Clamp between -1 and 1
-                    directions.append(direction)
-            
-            # Average direction across symbols
-            market_direction = np.mean(directions) if directions else 0.0
-            self.market_state['direction'] = market_direction
-            return market_direction
-            
-        except Exception as e:
-            logger.error(f"Error analyzing market direction: {e}")
-            return 0.0
-    
-    async def get_sentiment_multiplier(self) -> float:
-        """Returns sentiment-based position multiplier (0.5 to 1.5)."""
-        try:
-            # Get current Fear & Greed Index
-            fear_greed = await self.sentiment_analyzer.get_fear_greed_index(datetime.now())
-            
-            # Convert to 0-1 range and adjust to 0.5-1.5 range
-            sentiment_score = fear_greed / 100.0
-            multiplier = 0.5 + sentiment_score
-            
-            self.market_state['sentiment'] = sentiment_score
-            return multiplier
-            
-        except Exception as e:
-            logger.error(f"Error getting sentiment multiplier: {e}")
-            return 1.0  # Neutral multiplier on error
-    
-    async def analyze_onchain_metrics(self) -> float:
-        """Returns on-chain signal modifier (-0.5 to 0.5)."""
-        try:
-            # TODO: Implement real on-chain metrics
-            # For now, return mock data based on market direction
-            direction = self.market_state.get('direction', 0)
-            sentiment = self.market_state.get('sentiment', 0.5)
-            
-            # Combine signals with some randomness
-            modifier = (direction * 0.3 + (sentiment - 0.5) * 0.2) + np.random.normal(0, 0.1)
-            return max(min(modifier, 0.5), -0.5)
-            
-        except Exception as e:
-            logger.error(f"Error analyzing on-chain metrics: {e}")
-            return 0.0
-    
-    async def analyze_market_depth(self, symbol: str, size: float) -> Dict:
-        """
-        Analyze order book depth and expected slippage for a given trade size.
+    async def update(self, price_feed: CCXTPriceFeed, current_time: datetime) -> None:
+        """Update market state with latest data."""
+        logger.info("Starting market direction analysis...")
         
-        Args:
-            symbol: Trading pair symbol
-            size: Trade size in base currency
+        # Get symbols from price feed
+        symbols = list(price_feed.historical_data.keys())
+        
+        # Calculate basket weights based on market caps
+        basket_weights = await self._calculate_basket_weights(price_feed, current_time)
+        logger.info(f"Using basket weights: {basket_weights}")
+        
+        # Calculate direction for each coin
+        coin_directions = {}
+        for symbol in symbols:
+            logger.info(f"\nAnalyzing direction for {symbol}...")
             
-        Returns:
-            Dict containing market depth metrics
-        """
-        try:
-            order_book = await self.price_feed.get_order_book(symbol)
+            # Get historical candles
+            candles = await price_feed.get_historical_candles(
+                    symbol,
+                limit=self.long_window,
+                end_time=current_time
+            )
+            logger.info(f"Got {len(candles)} candles for {symbol}")
             
-            if not order_book or not order_book['bids'] or not order_book['asks']:
-                logger.warning(f"Empty order book for {symbol}")
-                return {
-                    'bid_depth': 0.0,
-                    'ask_depth': 0.0,
-                    'spread': 0.0,
-                    'slippage': 0.0,
-                    'is_liquid': False
-                }
+            # Extract prices
+            prices = [candle['close'] for candle in candles]
+            logger.info(f"Price range for {symbol}: {max(prices)} to {min(prices)}")
             
-            # Calculate bid and ask depth
-            bid_depth = sum(bid[1] for bid in order_book['bids'])
-            ask_depth = sum(ask[1] for ask in order_book['asks'])
+            # Calculate EMAs
+            ema_short = pd.Series(prices).ewm(span=self.short_window).mean().iloc[-1]
+            ema_long = pd.Series(prices).ewm(span=self.long_window).mean().iloc[-1]
             
-            # Calculate spread
-            best_bid = order_book['bids'][0][0]
-            best_ask = order_book['asks'][0][0]
-            spread = (best_ask - best_bid) / best_bid
+            logger.info(f"{symbol} EMAs:")
+            logger.info(f"  Short ({self.short_window}): {ema_short}")
+            logger.info(f"  Long ({self.long_window}): {ema_long}")
             
-            # Estimate slippage for the given size
-            slippage = 0.0
-            remaining_size = size
-            weighted_price = 0.0
+            # Calculate raw direction
+            raw_direction = (ema_short / ema_long - 1) * 10
+            logger.info(f"{symbol} raw direction: {raw_direction}")
             
-            for price, volume in order_book['asks']:
-                if remaining_size <= 0:
-                    break
-                filled = min(remaining_size, volume)
-                weighted_price += price * filled
-                remaining_size -= filled
+            # Calculate momentum
+            momentum = self._calculate_momentum(prices)
+            logger.info(f"{symbol} momentum: {momentum}")
             
-            if weighted_price > 0:
-                slippage = (weighted_price / size - best_ask) / best_ask
+            # Adjust direction based on momentum
+            direction = raw_direction * (1 + momentum * 0.2)
+            logger.info(f"{symbol} direction after momentum: {direction}")
             
-            return {
-                'bid_depth': bid_depth,
-                'ask_depth': ask_depth,
-                'spread': spread,
-                'slippage': slippage,
-                'is_liquid': bid_depth > size and ask_depth > size
-            }
+            coin_directions[symbol] = direction
             
-        except Exception as e:
-            logger.error(f"Error analyzing market depth: {e}")
-            return {
-                'bid_depth': 0.0,
-                'ask_depth': 0.0,
-                'spread': 0.0,
-                'slippage': 0.0,
-                'is_liquid': False
-            }
-    
-    async def get_market_state(self) -> Dict:
-        """Get complete market state analysis."""
-        try:
-            # Update market state if needed
-            if (not self.market_state['last_update'] or 
-                datetime.now() - self.market_state['last_update'] > timedelta(hours=1)):
+        # Calculate market direction as weighted average
+        market_direction = 0.0
+        for symbol, direction in coin_directions.items():
+            market_direction += direction * basket_weights[symbol]
+            
+        logger.info(f"\nFinal market direction: {market_direction}")
+        logger.info(f"Individual directions: {coin_directions}")
+        
+        # Update market state
+        logger.info(f"Market direction: {market_direction}, Coin directions: {coin_directions}")
+        
+        # Calculate sentiment multiplier (1.0 for now)
+        sentiment_multiplier = 1.0
+        logger.info(f"Sentiment multiplier: {sentiment_multiplier}")
+        
+        # Get Fear & Greed Index (50 for now)
+        fear_greed = 50.0
+        logger.info(f"Fear & Greed Index: {fear_greed}")
+        
+        # Calculate correlations
+        logger.info(f"Basket weights: {basket_weights}")
+        correlations = await self._calculate_correlations(price_feed, symbols, current_time)
+        
+        # Update market state
+        self.market_state.update({
+            'direction': market_direction,
+            'coin_directions': coin_directions,
+            'sentiment': sentiment_multiplier,
+            'fear_greed': fear_greed,
+            'basket_weights': basket_weights,
+            'correlations': correlations,
+            'is_oversold': market_direction < -0.5,
+            'is_overbought': market_direction > 0.5,
+            'volatility_multiplier': self._calculate_volatility_multiplier(prices),
+            'last_update': current_time
+        })
+        
+        logger.info(f"Updated market state: {self.market_state}")
+        
+    async def get_trading_signals(self, price_feed, current_time) -> Dict[str, float]:
+        """Generate trading signals based on market state."""
+        signals = {}
+        
+        for symbol in self.market_state['coin_directions'].keys():
+            coin_direction = self.market_state['coin_directions'][symbol]
+            base_signal = coin_direction * self.market_state['sentiment'] * 330  # Increased multiplier
+            
+            # Log signal calculation
+            logger.debug(f"\nSignal calculation for {symbol}:")
+            logger.debug(f"Coin direction: {coin_direction:.4f}")
+            logger.debug(f"Sentiment: {self.market_state['sentiment']:.4f}")
+            logger.debug(f"Base signal: {base_signal:.4f}")
+            
+            if abs(base_signal) >= 0.0000000000000000000000001:  # Very low threshold for testing
+                signals[symbol] = base_signal
+                logger.info(f"Generated signal for {symbol}: {base_signal:.4f}")
+            else:
+                logger.info(f"Signal for {symbol} ({base_signal:.4f}) below threshold, not generating")
+        
+        return signals
+        
+    async def _calculate_basket_weights(self, price_feed: CCXTPriceFeed, current_time: datetime) -> Dict[str, float]:
+        """Calculate basket weights based on market caps."""
+        weights = {}
+        total_mcap = 0.0
+        
+        # Get symbols from price feed
+        symbols = list(price_feed.historical_data.keys())
+        
+        # Calculate market caps
+        for symbol in symbols:
+            price = await price_feed.get_current_price(symbol, current_time)
+            # Use price as proxy for market cap (simplified)
+            mcap = price
+            total_mcap += mcap
+            weights[symbol] = mcap
+            
+        # Normalize weights
+        if total_mcap > 0:
+            for symbol in symbols:
+                weights[symbol] /= total_mcap
                 
-                direction = await self.analyze_market_direction()
-                sentiment = await self.get_sentiment_multiplier()
-                onchain = await self.analyze_onchain_metrics()
+        return weights
+        
+    def _calculate_momentum(self, prices: List[float], window: int = 14) -> float:
+        """Calculate momentum indicator."""
+        if len(prices) < window:
+            return 0.0
+            
+        # Calculate rate of change
+        roc = (prices[-1] - prices[-window]) / prices[-window]
+        return roc
+        
+    def _calculate_volatility_multiplier(self, prices: List[float], window: int = 14) -> float:
+        """Calculate volatility multiplier."""
+        if len(prices) < window:
+            return 1.0
+            
+        # Calculate standard deviation
+        std = pd.Series(prices[-window:]).std()
+        mean = pd.Series(prices[-window:]).mean()
+        
+        # Normalize volatility
+        volatility = std / mean
+        
+        # Convert to multiplier (lower volatility = higher multiplier)
+        multiplier = 1.0 / (1.0 + volatility)
+        
+        return multiplier
+        
+    async def _calculate_correlations(self, price_feed: CCXTPriceFeed, symbols: List[str], current_time: datetime) -> Dict[str, Dict[str, float]]:
+        """Calculate correlation matrix between symbols."""
+        correlations = {}
+        
+        # Get historical prices for all symbols
+        prices = {}
+        for symbol in symbols:
+            candles = await price_feed.get_historical_candles(
+                symbol,
+                limit=self.long_window,
+                end_time=current_time
+            )
+            prices[symbol] = [candle['close'] for candle in candles]
+            
+        # Calculate correlations
+        for symbol1 in symbols:
+            correlations[symbol1] = {}
+            for symbol2 in symbols:
+                if len(prices[symbol1]) == len(prices[symbol2]):
+                    corr = pd.Series(prices[symbol1]).corr(pd.Series(prices[symbol2]))
+                else:
+                    corr = 0.0
+                correlations[symbol1][symbol2] = corr
                 
-                self.market_state.update({
-                    'direction': direction,
-                    'sentiment': sentiment,
-                    'onchain': onchain,
-                    'last_update': datetime.now()
-                })
-            
-            return self.market_state.copy()
-            
-        except Exception as e:
-            logger.error(f"Error getting market state: {e}")
-            return self.market_state.copy() 
+        return correlations 

@@ -1,1 +1,3 @@
-"""Crypto Market Sentiment Trading Strategy.""" 
+"""
+Crypto Market Sentiment Analysis Trading System
+""" 
